@@ -1,0 +1,113 @@
+---
+title: "explore"
+output: html_document
+---
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE}
+# Load packages
+library(tidyverse)
+library(survival)
+library(splines) 
+```
+
+Variables Description:  
+1. Age   
+2. Race   
+3. Marital Status   
+4. T Stage: Adjusted AJCC 6th T   
+5. N Stage: Adjusted AJCC 6th N   
+6. 6th Stage: Breast Adjusted AJCC 6th Stage   
+7. Differentiate    
+8. Grade    
+9. A Stage: Regional — A neoplasm that has extended; Distant — A neoplasm that has spread to parts of the body remote from    
+10. Tumor Size: Each indicates exact size in millimeters.    
+11. Estrogen Status   
+12. Progesterone Status   
+13. Regional Node Examined   
+14. Reginol Node Positive   
+15. Survival Months   
+16. Status: Dead / Alive   
+
+Initial Analyses:  
+1. We decided to discard the T-stage and N-stage variables because they capture information already contained in the AJCC stage 6 variables.   
+2. We also excluded the differential variable because it captures very similar clinical information as the grade variable and grade is more comprehensive, combining morphological characteristics and biological behavior for grading.    
+3. Estrogen Status and Progesterone Status are usually highly correlated in clinical practice, so we need to consider their interaction.   
+4. Simplify the ratio of Regional Node Examined and Reginol Node Positive into one variable to reduce the model dimension.   
+5. Survival months directly reflects the survival time of patients and is strongly correlated with status. Using this variable in the modeling stage may lead to overfitting of the model. So we temporarily delete this variable.   
+
+```{r}
+# Import data
+breast_cancer <- read_csv('data/Project_2_data.csv', show_col_types = FALSE) %>%  
+  janitor::clean_names() %>% 
+  mutate(
+    race = as_factor(race),
+    marital_status = as_factor(marital_status),
+    x6th_stage = as_factor(x6th_stage),
+    differentiate = as_factor(differentiate),
+    a_stage = as_factor(a_stage),
+    estrogen_status = as_factor(estrogen_status),
+    progesterone_status = as_factor(progesterone_status), 
+    
+    # Calculates the proportion of positive regional nodes examined
+    regional_prop = reginol_node_positive / regional_node_examined
+  ) %>% 
+  select(-c(t_stage, n_stage, differentiate, reginol_node_positive, regional_node_examined, survival_months))
+
+# Convert Status to binary variable (Dead=1, Alive=0)
+breast_cancer$status <- ifelse(breast_cancer$status == "Dead", 1, 0)
+```
+
+```{r}
+breast_cancer %>% 
+  select(age, tumor_size, regional_prop) %>%
+  gather(key = "variable", value = "value") %>%
+  ggplot(aes(x = value)) +
+  geom_histogram(bins = 30, fill = "lightblue", color = "black") +
+  facet_wrap(~variable, scales = "free") +
+  theme_minimal() + 
+  labs(title = "Marginal Distributions of Continuous Variables", x = "", y = "Count") +
+  theme(plot.title = element_text(hjust = .5)) 
+```
+
+`tumor_size` is right skwed, consider transforming it to make it more normal.  
+`regional_prop` has a bimodal distribution, mainly concentrated around 0 and 1, indicating that the positive proportion of most patients is either very low (close to 0) or close to 100%. This variable has nonlinear characteristics, and it can be considered to be binned or use nonlinear modeling methods (such as generalized additive models).  
+
+```{r}
+# Marginal distribution of categorical variables
+categorical_vars <- c("race", "marital_status", "x6th_stage", "grade", "a_stage", 
+                      "estrogen_status", "progesterone_status")
+
+for (var in categorical_vars) {
+  p <- ggplot(breast_cancer, aes_string(x = var)) +
+    geom_bar(fill = "lightblue", color = "black") +
+    theme_minimal() +
+    labs(title = paste("Distribution of", var), x = var, y = "Count") +
+    theme(axis.text.x = element_text(angle = 45, hjust = 1),
+          plot.title = element_text(hjust = .5))
+  print(p)
+}
+```
+
+```{r}
+breast_cancer <- breast_cancer %>% 
+  mutate(
+    tumor_size = log(tumor_size), 
+    race = fct_collapse(race, 
+                        "Non-White" = c("Black", "Other")),
+    
+    x6th_stage = fct_collapse(x6th_stage, 
+                              "IIIB_IIIC" = c("IIIB", "IIIC"))
+  )
+```
+
+Check the correlation between estrogen and progesterone status  
+
+```{r}
+table(breast_cancer$estrogen_status, breast_cancer$progesterone_status)
+
+cor_estrogen_progest <- cor(as.numeric(breast_cancer$estrogen_status), 
+                            as.numeric(breast_cancer$progesterone_status))
+print(cor_estrogen_progest)
+```
+
+This indicates that there is a moderate positive correlation between the two, but not enough to indicate that there is a multicollinearity problem. We combine estrogen_status and progesterone_status into a new variable reflecting their interaction.  

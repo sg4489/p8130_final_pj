@@ -1,0 +1,176 @@
+---
+title: "codes"
+output: html_document
+---
+
+```{r, message=FALSE, warning=FALSE, echo=FALSE}
+# Load packages
+library(MASS)
+library(caret)
+library(tidyverse)
+library(survival)
+library(splines) 
+library(broom)
+```
+
+```{r}
+# Import data
+breast_cancer <- read_csv('data/Project_2_data.csv', show_col_types = FALSE) %>%  
+  janitor::clean_names() %>% 
+  mutate(
+    race = as_factor(race),
+    marital_status = as_factor(marital_status),
+    x6th_stage = as_factor(x6th_stage),
+    differentiate = as_factor(differentiate),
+    a_stage = as_factor(a_stage),
+    estrogen_status = as_factor(estrogen_status),
+    progesterone_status = as_factor(progesterone_status), 
+    # Calculates the proportion of positive regional nodes examined
+    regional_prop = reginol_node_positive / regional_node_examined, 
+    # Transform tumor_size
+    tumor_size = log(tumor_size), 
+    x6th_stage = fct_collapse(x6th_stage, "IIIB_IIIC" = c("IIIB", "IIIC")), 
+  ) %>% 
+  dplyr::select(-c(t_stage, n_stage, differentiate, reginol_node_positive, regional_node_examined, survival_months))
+
+# Convert Status to binary variable (Dead=1, Alive=0)
+breast_cancer$status <- ifelse(breast_cancer$status == "Dead", 1, 0)
+
+breast_cancer <- breast_cancer %>%
+  mutate(regional_prop_spline = ns(regional_prop, df = 3)) 
+```
+
+Build the full model 
+
+```{r}
+full_model <- glm(status ~ age + race + marital_status + x6th_stage + grade + 
+                  estrogen_status * progesterone_status + tumor_size + regional_prop, 
+                  data = breast_cancer, family = binomial())
+full_model <- glm(
+  status ~ age + race + marital_status + x6th_stage + grade + 
+           estrogen_status * progesterone_status + tumor_size + 
+           ns(regional_prop, df = 3), 
+  data = breast_cancer,
+  family = binomial
+)
+```
+
+Use AIC to optimize the model  
+
+```{r}
+opt_model <- stepAIC(full_model, direction = "both", trace = FALSE)
+summary(opt_model)
+car::vif(opt_model)
+```
+
+
+```{r}
+breast_cancer$status <- as.factor(breast_cancer$status)
+# 10-fold cross validation
+set.seed(123)
+train_control <- trainControl(method = "cv", number = 10)
+cv_model <- train(
+  status ~ age + race + marital_status + x6th_stage + grade +
+           estrogen_status * progesterone_status + tumor_size + regional_prop,
+  data = breast_cancer,
+  method = "glm",
+  family = binomial,
+  trControl = train_control
+)
+
+print(cv_model)
+```
+
+```{r}
+breast_cancer$pred_prob <- predict(opt_model, type = "response")
+
+library(pROC)
+roc_curve <- roc(breast_cancer$status, breast_cancer$pred_prob)
+plot(roc_curve, main = "ROC Curve")
+auc(roc_curve)
+
+breast_cancer$status <- as.numeric(as.character(breast_cancer$status))
+breast_cancer$pred_prob <- predict(opt_model, type = "response")
+brier_score <- mean((breast_cancer$pred_prob - breast_cancer$status)^2)
+print(paste("Brier Score:", round(brier_score, 4)))
+```
+
+Summary: 
+
+**status∼age + race + marital_status + x6th_stage + grade + estrogen_status + progesterone_status + tumor_size + ns(regional_prop, df = 3)**
+
+Key Features in the Model:
+1. Linear Predictors:
+`age`: Age of the patient.
+`race`: Ethnicity group (e.g., White, Black, Other).
+`marital_status`: Marital status of the patient.
+`x6th_stage`: Tumor staging category.
+`grade`: Cancer grade (including Grade IV as Anaplastic).
+`tumor_size`: Transformed tumor size (log-transformed).
+2. Nonlinear Relationship:
+`regional_prop`: Modeled using natural splines (ns) with 3 degrees of freedom to capture its non-linear relationship.
+3. Interaction Term:
+estrogen_status * progesterone_status: To account for the interaction effect between estrogen and progesterone statuses.
+4. Model Performance:
+AUC: 0.7513 — indicating good discriminatory power.
+Brier Score: 0.1119 — reflecting well-calibrated probability predictions.
+Accuracy: 85.5% (with 10-fold cross-validation).
+Kappa: 0.175, showing moderate agreement.
+
+Why This Model?
+Balance of Performance and Interpretability:
+A Generalized Linear Model (GLM) with natural splines and interaction terms achieves a good trade-off between predictive accuracy and interpretability.
+Handling Non-Linearity:
+By applying splines to regional_prop, the model effectively captures its nonlinear impact on the outcome.
+
+```{r}
+breast_cancer$pred_prob <- predict(opt_model, type = "response")
+
+# Create a new column for simplified race groups
+breast_cancer <- breast_cancer %>%
+  mutate(race_group = case_when(
+    race == "White" ~ "White",
+    race == "Black" ~ "Black",
+    TRUE ~ "Other"
+  ))
+
+# Function to evaluate performance metrics
+evaluate_performance <- function(data, group_name) {
+  cat("\nPerformance for:", group_name, "\n")
+  
+  # Calculate ROC and AUC
+  roc_curve <- roc(data$status, data$pred_prob)
+  auc_value <- auc(roc_curve)
+  cat("AUC:", auc_value, "\n")
+  
+  # Binary predictions for accuracy
+  data$pred_class <- ifelse(data$pred_prob > 0.5, 1, 0)
+  confusion <- confusionMatrix(as.factor(data$pred_class), as.factor(data$status), positive = "1")
+  
+  cat("Accuracy:", confusion$overall['Accuracy'], "\n")
+  cat("Kappa:", confusion$overall['Kappa'], "\n")
+}
+
+# White group
+white_group <- breast_cancer %>% filter(race_group == "White")
+evaluate_performance(white_group, "White")
+
+# Black group
+black_group <- breast_cancer %>% filter(race_group == "Black")
+evaluate_performance(black_group, "Black")
+
+# Other group
+other_group <- breast_cancer %>% filter(race_group == "Other")
+evaluate_performance(other_group, "Other")
+```
+
+Conclusion:  
+The White group achieves the best balance between AUC and Accuracy.  
+The Black group has acceptable accuracy but a lower AUC, suggesting room for improvement.  
+The Other group has high accuracy but low AUC and Kappa, indicating overfitting or poor calibration.  
+
+
+
+
+
+
